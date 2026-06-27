@@ -1,0 +1,69 @@
+import json
+
+with open("results/retrieval_results.json") as f:
+    results = json.load(f)
+
+def load_jsonl(path):
+    with open(path) as f:
+        return [json.loads(line) for line in f]
+
+corpus_data = load_jsonl("data/corpus.jsonl")
+corpus_lookup = {str(doc["doc_id"]): doc for doc in corpus_data}
+
+failures = [r for r in results if r["gold_rank"] is None]
+
+print(f"── Failure diagnosis ({len(failures)} cases) ──\n")
+
+# Also look at near-misses — gold just outside top-10
+near_misses = [r for r in results if r["gold_rank"] and r["gold_rank"] > 5]
+print(f"Gold at rank 6-10 (near misses): {len(near_misses)}")
+print(f"Gold not in top-10 at all: {len(failures)}\n")
+
+print("── Hard failures (gold not in top-10) ──\n")
+for r in failures:
+    gold_ids = r["gold_doc_ids"]
+    
+    # Claim length in words — proxy for specificity
+    claim_word_count = len(r["claim"].split())
+    
+    # Gold abstract length — how much content to average over
+    gold_lengths = []
+    for gid in gold_ids:
+        if gid in corpus_lookup:
+            gold_lengths.append(len(corpus_lookup[gid]["abstract"]))
+    
+    # Score distribution — is top-1 high (confident wrong) or low (uncertain)?
+    top_score = r["top_scores"][0]
+    score_gap = r["top_scores"][0] - r["top_scores"][4]  # gap across top-5
+    
+    # Classify failure type
+    if top_score > 0.65:
+        failure_type = "HIGH CONF WRONG — vocabulary mismatch likely"
+    elif max(gold_lengths) > 15:
+        failure_type = "LONG ABSTRACT — length dilution likely"
+    else:
+        failure_type = "LOW CONF — ambiguous claim or weak corpus match"
+    
+    print(f"Claim ({claim_word_count} words): {r['claim']}")
+    print(f"Top-5 scores: {[f'{s:.4f}' for s in r['top_scores'][:5]]}")
+    print(f"Score gap (rank1 - rank5): {score_gap:.4f}")
+    print(f"Gold abstract length(s): {gold_lengths} sentences")
+    print(f"Failure type: {failure_type}")
+    print()
+
+# Summary
+high_conf = sum(1 for r in failures 
+                if r["top_scores"][0] > 0.65)
+long_abstract = sum(1 for r in failures 
+                    if any(len(corpus_lookup.get(gid, {}).get("abstract", [])) > 15 
+                           for gid in r["gold_doc_ids"]))
+low_conf = len(failures) - high_conf - long_abstract
+
+print(f"── Failure type summary ──")
+print(f"High confidence wrong (vocab mismatch): {high_conf}")
+print(f"Long abstract (length dilution):        {long_abstract}")  
+print(f"Low confidence (ambiguous):             {low_conf}")
+print(f"\nConclusion:")
+print(f"  If high_conf dominates → try specter2 (domain-specific)")
+print(f"  If long_abstract dominates → try e5 (query/passage prefixes)")
+print(f"  If mixed → try both")
